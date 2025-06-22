@@ -2,181 +2,132 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 import plotly.express as px
+import datetime
 
-# 한글 깨짐 걱정 없는 기본 폰트만 사용
-import matplotlib
-matplotlib.rcParams['font.family'] = 'DejaVu Sans'
-matplotlib.rcParams['axes.unicode_minus'] = False
-
-BOOK_META = "book_meta.csv"
-LOAN_FILES = ["loan_2022.csv", "loan_2023.csv", "loan_2024.csv"]
-LOAN_RETURN_STAT = "loan_return_stat_2022_2024.csv"
-
-# 분야코드-분야명 매핑 (히트맵에서는 코드만 사용)
-SUBJECT_CODE_MAP = {
-    "A": "총류",
-    "B": "철학",
-    "C": "종교",
-    "D": "사회과학",
-    "E": "어학",
-    "F": "순수과학",
-    "G": "응용과학",
-    "H": "예술",
-    "I": "문학",
-    "J": "역사"
-}
+def classify_call_number(call_no, output='code'):
+    if not isinstance(call_no, str) or not call_no:
+        return "기타" if output == "name" else "ETC"
+    code = call_no.strip()[0]
+    code_map = {
+        "0": ("000", "총류"),
+        "1": ("100", "철학"),
+        "2": ("200", "종교"),
+        "3": ("300", "사회과학"),
+        "4": ("400", "자연과학"),
+        "5": ("500", "기술과학"),
+        "6": ("600", "예술"),
+        "7": ("700", "언어"),
+        "8": ("800", "문학"),
+        "9": ("900", "역사")
+    }
+    return code_map.get(code, ("ETC", "기타"))[0 if output == 'code' else 1]
 
 @st.cache_data
 def load_data():
-    book_meta = pd.read_csv(BOOK_META, encoding='utf-8')
-    loans = pd.concat([pd.read_csv(f, encoding='utf-8') for f in LOAN_FILES], ignore_index=True)
-    for f in LOAN_FILES:
-        y = f.split("_")[1].split(".")[0]
-        loans.loc[loans['대출일자'].astype(str).str.startswith(y), '연도'] = y
-    loan_return = pd.read_csv(LOAN_RETURN_STAT, encoding='utf-8')
-    return book_meta, loans, loan_return
+    df22 = pd.read_csv("loan_2022.csv", encoding="utf-8")
+    df23 = pd.read_csv("loan_2023.csv", encoding="utf-8")
+    df24 = pd.read_csv("loan_2024.csv", encoding="utf-8")
+    meta = pd.read_csv("book_meta.csv", encoding="utf-8")
+    df22["연도"] = 2022
+    df23["연도"] = 2023
+    df24["연도"] = 2024
+    loan = pd.concat([df22, df23, df24], ignore_index=True)
+    return loan, meta
 
-def get_subject_code(callnum):
-    if pd.isnull(callnum):
-        return None
-    c = str(callnum).strip().upper()
-    code = c[0] if c and c[0] in SUBJECT_CODE_MAP else None
-    return code
+loan, meta = load_data()
 
-def is_valid_dept(name):
-    if pd.isnull(name): return False
-    s = str(name)
-    return (
-        "도서관" not in s and "합계" not in s and "비율" not in s and "센터" not in s and s.strip() != ""
+# 신간/구간 라벨링
+current_year = 2025
+meta["출판년도"] = meta["출판년도"].astype(str).str[:4].replace("nan", np.nan)
+meta["출판년도"] = pd.to_numeric(meta["출판년도"], errors="coerce")
+meta["신간/구간"] = np.where(meta["출판년도"].notnull() & (current_year - meta["출판년도"] <= 3), "신간", "구간")
+
+loan = pd.merge(loan, meta[["등록번호", "출판년도", "신간/구간"]], on="등록번호", how="left")
+
+exclude_orgs = [
+    "AI.DX센터", "AI·DX 센터", "AI·DX센터", "AI·DX 센터", "AIㆍDX센터",
+    "교무처", "교수학습지원센터", "기타", "기획처", "도서관", "보건실",
+    "사무처", "산학융복합교육센터", "산학협력단", "입학학생처(입학)", "입학학생처(학생)",
+    "취장업지원처", "학생상담실", "혁신지원사업팀"
+]
+
+departments = sorted([d for d in loan["소속"].dropna().unique()
+                      if not any(org.replace(" ", "") in d.replace(" ", "") for org in exclude_orgs)])
+
+st.title("연암공과대학교 도서관: 학과별 대출 분석 대시보드")
+dept = st.selectbox("학과를 선택하세요", departments)
+
+tab1, tab2, tab3 = st.tabs([
+    "연도별/학과별 대출 트렌드 & 인기 도서",
+    "신간 vs 구간 대출 패턴",
+    "분야별 인기 주제"
+])
+
+with tab1:
+    st.subheader(f"학과: {dept} | 연도별 대출 트렌드")
+    df_dept = loan[loan["소속"] == dept]
+    trend = df_dept.groupby("연도").size().reset_index(name="대출건수")
+    fig1 = px.bar(trend, x="연도", y="대출건수", text="대출건수", title="연도별 대출건수")
+    st.plotly_chart(fig1)
+    st.markdown("---")
+    st.subheader("연도별 Top 10 인기 도서")
+    year = st.selectbox("연도 선택", sorted(df_dept["연도"].unique(), reverse=True))
+    top_books = (
+        df_dept[df_dept["연도"] == year]
+        .groupby(["등록번호", "서명"])
+        .size()
+        .reset_index(name="대출횟수")
+        .sort_values("대출횟수", ascending=False)
+        .head(10)
     )
+    st.dataframe(top_books[["서명", "대출횟수"]], use_container_width=True)
+    fig2 = px.bar(top_books, x="서명", y="대출횟수", text="대출횟수", title=f"{year}년 Top 10 도서")
+    fig2.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig2)
 
-book_meta, loans, loan_return = load_data()
-st.set_page_config(page_title="연암공과대 도서관 대시보드", layout="wide")
-st.title("연암공과대학교 도서관 데이터 분석 대시보드 📊")
-
-menu = st.sidebar.radio(
-    "분석 주제 선택",
-    (
-        "① 연도별/학과별 대출 트렌드와 인기 도서 변화",
-        "② 신간 vs 구간 도서 대출 패턴 차이",
-        "③ 학과별·주제별 도서 선호도/희소·휴면도서",
-        "④ 일자별 대출/반납 패턴 & 계절효과"
+with tab2:
+    st.subheader(f"학과: {dept} | 신간(3년 이내) vs 구간(3년 이상) 대출 패턴")
+    df_dept = loan[loan["소속"] == dept]
+    trend2 = df_dept.groupby(["연도", "신간/구간"]).size().reset_index(name="대출건수")
+    fig3 = px.bar(trend2, x="연도", y="대출건수", color="신간/구간", barmode="group", text="대출건수",
+                  title="연도별 신간/구간 대출 비교")
+    st.plotly_chart(fig3)
+    st.markdown("---")
+    st.subheader("신간/구간 도서 인기 TOP 5")
+    type_choice = st.radio("분류 선택", ["신간", "구간"])
+    filtered = df_dept[df_dept["신간/구간"] == type_choice]
+    top_type = (
+        filtered
+        .groupby(["등록번호", "서명"])
+        .size()
+        .reset_index(name="대출횟수")
+        .sort_values("대출횟수", ascending=False)
+        .head(5)
     )
-)
+    st.dataframe(top_type[["서명", "대출횟수"]], use_container_width=True)
+    fig4 = px.bar(top_type, x="서명", y="대출횟수", text="대출횟수", title=f"{type_choice} 도서 Top 5")
+    fig4.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig4)
 
-# 1. 연도별/학과별 대출 트렌드와 인기 도서 변화
-if menu.startswith("①"):
-    st.header("① 연도별/학과별 대출 트렌드와 인기 도서 변화")
-    loans['연도'] = loans['대출일자'].astype(str).str[:4]
-    dept_col = "소속" if "소속" in loans.columns else loans.columns[loans.columns.str.contains("소속|학과|부서")][0]
-    trend = loans.groupby(['연도', dept_col]).size().reset_index(name='대출건수')
-    fig = px.line(trend, x='연도', y='대출건수', color=dept_col, markers=True, title="연도별/학과별 대출건수 추이")
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("#### 연도별 Top 10 인기 도서")
-    top_n = 10
-    years = sorted(loans['연도'].dropna().unique())
-    for y in years:
-        try:
-            top = loans[loans['연도'] == y]['서명'].value_counts().head(top_n)
-            st.write(f"**{y}년 Top {top_n} 도서**")
-            st.dataframe(top.reset_index().rename(columns={'index': '서명', '서명': '대출수'}))
-        except Exception as e:
-            st.warning(f"{y}년 데이터 오류: {e}")
-
-    st.markdown("### 저자/출판사별 인기 변화")
-    try:
-        if '저자' not in loans.columns and '저자' in book_meta.columns:
-            loans_merge = pd.merge(loans, book_meta[['등록번호', '저자', '출판사']], on='등록번호', how='left')
-        else:
-            loans_merge = loans.copy()
-        if '저자' in loans_merge.columns:
-            top_authors = loans_merge.groupby(['연도','저자']).size().reset_index(name='대출수')
-            fig = px.bar(top_authors.sort_values('대출수', ascending=False).groupby('연도').head(5),
-                        x='연도', y='대출수', color='저자', barmode='group', title='연도별 인기 저자 Top 5')
-            st.plotly_chart(fig, use_container_width=True)
-        if '출판사' in loans_merge.columns:
-            top_pubs = loans_merge.groupby(['연도','출판사']).size().reset_index(name='대출수')
-            fig = px.bar(top_pubs.sort_values('대출수', ascending=False).groupby('연도').head(5),
-                        x='연도', y='대출수', color='출판사', barmode='group', title='연도별 인기 출판사 Top 5')
-            st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"저자/출판사별 인기 변화 계산 오류: {e}")
-
-# 2. 신간 vs 구간 도서 대출 패턴 차이
-elif menu.startswith("②"):
-    st.header("② 신간 vs 구간 도서 대출 패턴 차이")
-    loans = loans.merge(book_meta[['등록번호', '출판년도']], on='등록번호', how='left')
-    loans['출판년도'] = pd.to_numeric(loans['출판년도'], errors='coerce')
-    loans['연도'] = loans['대출일자'].astype(str).str[:4].astype(int)
-    loans['도서_구분'] = np.where(loans['연도'] - loans['출판년도'] <= 3, '신간', '구간')
-    pie = loans['도서_구분'].value_counts()
-    st.plotly_chart(px.pie(pie, names=pie.index, values=pie.values, title="신간 vs 구간 대출 비율"), use_container_width=True)
-    count_by_year = loans.groupby(['연도', '도서_구분']).size().reset_index(name='대출건수')
-    st.plotly_chart(px.bar(count_by_year, x='연도', y='대출건수', color='도서_구분', barmode='group', title="연도별 신간/구간 대출량"), use_container_width=True)
-
-    st.markdown("#### 연도별 Top 10 신간/구간 도서")
-    for cat in ['신간', '구간']:
-        st.write(f"**{cat} Top 10**")
-        df_cat = loans[loans['도서_구분'] == cat]
-        top = df_cat['서명'].value_counts().head(10)
-        st.dataframe(top.reset_index().rename(columns={'index':'서명', '서명':'대출수'}))
-
-# 3. 학과별·주제별 도서 선호도와 희소/휴면도서
-elif menu.startswith("③"):
-    st.header("③ 학과별·주제별 도서 선호도와 희소/휴면도서")
-    st.markdown("- loan_20xx.csv의 소속, 청구기호 활용 / 분야코드(영문) 기준 - 한글명은 하단 설명")
-
-    loans['분야코드'] = loans['청구기호'].apply(get_subject_code)
-    valid = loans[(loans['분야코드'].isin(list(SUBJECT_CODE_MAP.keys()))) & loans['소속'].apply(is_valid_dept)]
-    pivot = valid.pivot_table(index='소속', columns='분야코드', values='서명', aggfunc='count', fill_value=0)
-    annot = pivot.applymap(lambda x: '' if x == 0 else int(x))
-
-    plt.figure(figsize=(max(10, len(pivot.columns)*1.1), max(6, len(pivot)*0.5)))
-    ax = sns.heatmap(
-        pivot,
-        annot=annot, fmt='', linewidths=0.5, linecolor='gray', cmap='YlGnBu',
-        cbar=True, annot_kws={"fontsize":10}
+with tab3:
+    st.subheader(f"학과: {dept} | 분야(주제)별 인기 대출 현황")
+    df_dept = loan[loan["소속"] == dept].copy()
+    # 분야코드/분야명 컬럼 추가 (분야명 한글, 코드도 가능)
+    df_dept["분야명"] = df_dept["청구기호"].apply(lambda x: classify_call_number(x, output="name"))
+    df_dept["분야코드"] = df_dept["청구기호"].apply(lambda x: classify_call_number(x, output="code"))
+    year2 = st.selectbox("분야별 대출 연도 선택", sorted(df_dept["연도"].unique(), reverse=True), key="subject_year")
+    n = st.slider("TOP N (많이 대출된 분야)", min_value=3, max_value=10, value=5)
+    top_subjects = (
+        df_dept[df_dept["연도"] == year2]
+        .groupby("분야명")
+        .size()
+        .reset_index(name="대출건수")
+        .sort_values("대출건수", ascending=False)
+        .head(n)
     )
-    plt.ylabel("학과", fontsize=13)
-    plt.xlabel("분야코드", fontsize=13)
-    plt.title("학과별 분야코드 대출건수", fontsize=14)
-    plt.xticks(rotation=30, ha='right', fontsize=11)
-    plt.yticks(fontsize=10)
-    st.pyplot(plt.gcf())
-    plt.clf()
-
-    # 코드-분야명 설명 같이 보여주기
-    st.markdown("""
-    분야코드-분야명  
-    A: 총류, B: 철학, C: 종교, D: 사회과학, E: 어학, F: 순수과학, G: 응용과학, H: 예술, I: 문학, J: 역사
-    """)
-
-    # 희소/휴면분야 테이블 (학과/분야별 대출 1회 이하)
-    st.markdown("##### 대출 1회 이하 희소/휴면분야 (학과/분야코드별)")
-    sparse = (
-        valid.groupby(['소속', '분야코드']).size()
-        .reset_index(name='대출건수')
-        .query('대출건수 <= 1')
-        .rename(columns={'소속':'학과'})
-    )
-    st.dataframe(sparse)
-
-# 4. 일자별 대출/반납 패턴 및 계절 효과 분석
-elif menu.startswith("④"):
-    st.header("④ 일자별 대출/반납 패턴 및 계절 효과 분석")
-    st.markdown("loan_return_stat_2022_2024.csv의 [기관, 신분, 대출권수/반납권수] 데이터 기준")
-    cols = loan_return.columns
-    loc1 = [c for c in cols if "기관" in c or "loc1" in c][0]
-    cc = [c for c in cols if "신분" in c or "CcCodeName" in c][0]
-    loan_col = [c for c in cols if "대출권수" in c][0]
-    return_col = [c for c in cols if "반납권수" in c][0]
-    total = loan_return.groupby([loc1, cc])[[loan_col, return_col]].sum().reset_index()
-    st.write("기관·신분별 대출/반납건수")
-    st.dataframe(total)
-    fig = px.bar(total, x=cc, y=loan_col, color=loc1, title="신분별 대출권수")
-    st.plotly_chart(fig, use_container_width=True)
-    fig = px.bar(total, x=cc, y=return_col, color=loc1, title="신분별 반납권수")
-    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(top_subjects, use_container_width=True)
+    fig5 = px.bar(top_subjects, x="분야명", y="대출건수", text="대출건수",
+                  title=f"{year2}년 분야별 인기 TOP {n}")
+    fig5.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig5)
